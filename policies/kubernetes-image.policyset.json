@@ -1,0 +1,209 @@
+{
+  "id": "kubernetes-image",
+  "meta": {
+    "description": "Security material a promoted Kubernetes image carries: its tag signature, its SLSA verification summary, its promotion record and its origin signature"
+  },
+  "common": {
+    "context": {
+      "image": {
+        "required": true,
+        "description": "Name of the image repository on registry.k8s.io (without tag or digest)"
+      },
+      "verifier": {
+        "value": "https://k8s.io/promo-tools/verifier/v1",
+        "description": "Identifier of the verifier the summary has to come from (matched with or without a version)"
+      },
+      "staging_registry": {
+        "value": "us-central1-docker.pkg.dev/k8s-staging-images/",
+        "description": "Where promoted images come from"
+      }
+    }
+  },
+  "policies": [
+    {
+      "id": "tag-signature",
+      "meta": {
+        "description": "The image tag is signed by the Kubernetes image promoter"
+      },
+      "identities": [
+        {
+          "sigstore": {
+            "issuer": "https://accounts.google.com",
+            "identity": "krel-trust@k8s-releng-prod.iam.gserviceaccount.com"
+          }
+        }
+      ],
+      "predicates": {
+        "types": ["https://cosign.sigstore.dev/signature/v1"]
+      },
+      "tenets": [
+        {
+          "outputs": {
+            "signers": {
+              "code": "predicates.map(p, p.verification.identities.map(i, i.sigstore.identity)).flatten()"
+            }
+          },
+          "code": "size(predicates) > 0 && predicates.all(p, p.verification.verified)",
+          "assessment": { "message": "Image tag signed by the promoter" },
+          "error": {
+            "message": "No verified promoter signature on the image tag",
+            "guidance": "The image was not promoted by the Kubernetes image promoter"
+          }
+        }
+      ]
+    },
+    {
+      "id": "verification-summary",
+      "meta": {
+        "description": "A SLSA verification summary from the promoter's verifier records a passing SLSA Build L3 verification and a reviewed promotion manifest"
+      },
+      "identities": [
+        {
+          "sigstore": {
+            "issuer": "https://accounts.google.com",
+            "identity": "promoter-summaries@k8s-releng-prod.iam.gserviceaccount.com"
+          }
+        }
+      ],
+      "predicates": {
+        "types": ["https://slsa.dev/verification_summary/v1"]
+      },
+      "tenets": [
+        {
+          "id": "verifier",
+          "outputs": {
+            "verifier": {
+              "code": "has(predicates[0].data.verifier) && has(predicates[0].data.verifier.id) ? predicates[0].data.verifier.id : ''"
+            }
+          },
+          "code": "outputs.verifier == context.verifier || outputs.verifier.startsWith(context.verifier + '@')",
+          "assessment": { "message": "Summary issued by the expected verifier" },
+          "error": {
+            "message": "Summary NOT issued by the expected verifier",
+            "guidance": "Expected {{ .Context.verifier }}, got {{ .Outputs.verifier }}"
+          }
+        },
+        {
+          "id": "result",
+          "outputs": {
+            "result": {
+              "code": "has(predicates[0].data.verificationResult) ? predicates[0].data.verificationResult : ''"
+            },
+            "levels": {
+              "code": "has(predicates[0].data.verifiedLevels) ? predicates[0].data.verifiedLevels : []"
+            }
+          },
+          "code": "outputs.result == 'PASSED' && outputs.levels.exists(l, l == 'SLSA_BUILD_LEVEL_3' || l == 'SLSA_BUILD_LEVEL_4') && outputs.levels.exists(l, l == 'K8S_PROMOTION_MANIFEST_REVIEWED')",
+          "assessment": { "message": "Verification passed at SLSA Build L3 with a reviewed promotion manifest" },
+          "error": {
+            "message": "Verification did not pass at SLSA Build L3 with a reviewed promotion manifest",
+            "guidance": "Result {{ .Outputs.result }}, levels {{ .Outputs.levels }}"
+          }
+        },
+        {
+          "id": "resource",
+          "outputs": {
+            "resource": {
+              "code": "has(predicates[0].data.resourceUri) ? predicates[0].data.resourceUri : ''"
+            }
+          },
+          "code": "outputs.resource == context.image + '@sha256:' + subject.digest['sha256']",
+          "assessment": { "message": "Summary is about this image" },
+          "error": {
+            "message": "Summary is about another resource",
+            "guidance": "The summary names {{ .Outputs.resource }}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "promotion-record",
+      "meta": {
+        "description": "The promoter recorded promoting this image from the staging registry in a postsubmit job"
+      },
+      "identities": [
+        {
+          "sigstore": {
+            "issuer": "https://accounts.google.com",
+            "identity": "krel-trust@k8s-releng-prod.iam.gserviceaccount.com"
+          }
+        }
+      ],
+      "predicates": {
+        "types": ["https://k8s.io/promo-tools/promotion/v1"]
+      },
+      "tenets": [
+        {
+          "id": "destination",
+          "outputs": {
+            "name": { "code": "has(predicates[0].data.destination) ? predicates[0].data.destination.name : ''" },
+            "digest": { "code": "has(predicates[0].data.destination) && has(predicates[0].data.destination.digest) ? predicates[0].data.destination.digest['sha256'] : ''" }
+          },
+          "code": "outputs.name == context.image && outputs.digest == subject.digest['sha256']",
+          "assessment": { "message": "Promotion record names this image" },
+          "error": {
+            "message": "Promotion record is about another image",
+            "guidance": "Record names {{ .Outputs.name }}@sha256:{{ .Outputs.digest }}"
+          }
+        },
+        {
+          "id": "source",
+          "outputs": {
+            "source": { "code": "has(predicates[0].data.source) ? predicates[0].data.source.name : ''" }
+          },
+          "code": "outputs.source.startsWith(context.staging_registry)",
+          "assessment": { "message": "Image promoted from the staging registry" },
+          "error": {
+            "message": "Image promoted from outside the staging registry",
+            "guidance": "Promoted from {{ .Outputs.source }}"
+          }
+        },
+        {
+          "id": "job",
+          "outputs": {
+            "builder": { "code": "has(predicates[0].data.builderId) ? predicates[0].data.builderId : ''" },
+            "jobType": { "code": "has(predicates[0].data.job) ? predicates[0].data.job.type : ''" },
+            "manifest": { "code": "has(predicates[0].data.manifest) ? predicates[0].data.manifest.name : ''" }
+          },
+          "code": "outputs.builder.startsWith('https://k8s.io/promo-tools') && outputs.jobType == 'postsubmit' && outputs.manifest.startsWith('registry.k8s.io/images/')",
+          "assessment": { "message": "Promoted by promo-tools in a postsubmit job from a registry.k8s.io manifest" },
+          "error": {
+            "message": "Promotion was not made by promo-tools in a postsubmit job",
+            "guidance": "Builder {{ .Outputs.builder }}, job type {{ .Outputs.jobType }}, manifest {{ .Outputs.manifest }}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "origin-signature",
+      "meta": {
+        "description": "The staging pipeline that built the image signed it before promotion"
+      },
+      "identities": [
+        {
+          "sigstore": {
+            "issuer": "https://accounts.google.com",
+            "identity": "sp-operator-sa@k8s-staging-images.iam.gserviceaccount.com"
+          }
+        }
+      ],
+      "predicates": {
+        "types": ["https://sigstore.dev/cosign/sign/v1"]
+      },
+      "tenets": [
+        {
+          "outputs": {
+            "signers": {
+              "code": "predicates.map(p, p.verification.identities.map(i, i.sigstore.identity)).flatten()"
+            }
+          },
+          "code": "size(predicates) > 0 && predicates.all(p, p.verification.verified)",
+          "assessment": { "message": "Image signed by its staging pipeline before promotion" },
+          "error": {
+            "message": "No verified origin signature from the staging pipeline"
+          }
+        }
+      ]
+    }
+  ]
+}
